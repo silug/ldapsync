@@ -1,0 +1,351 @@
+#!/usr/bin/perl
+#
+# ldapdiff - Compare the contents of the directory on two LDAP servers
+#
+# Copyright (C) 2006 Steven Pritchard <steve@kspei.com>
+# This program is free software; you can redistribute it
+# and/or modify it under the same terms as Perl itself.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+#
+# $Id: ldapsync,v 1.1 2006/02/21 21:21:02 steve Exp $
+
+=head1 NAME
+
+ldapdiff - Compare the contents of the directory on two LDAP servers
+
+=cut
+
+use strict;
+use warnings;
+
+use Net::LDAP;
+use File::Basename;
+use Getopt::Long;
+use Pod::Usage;
+
+our $help=0;
+our $verbose=0;
+our $debug=0;
+our $simpleauth=1;
+our @binddn;
+our @secret;
+our @secretfile;
+our @ldapuri;
+our @searchbase;
+our @filter;
+our $scope='sub';
+our $starttls=0;
+our $dryrun=0;
+
+=head1 SYNOPSIS
+
+ldapdiff [options]
+
+ Options:
+   --simpleauth -x      Use simple authentication (default)
+   --binddn     -D      Secify the Distinguished Name to bind to LDAP
+   --secret     -w      Specify the password
+   --secretfile -y      Specify a file to read for a password
+   --ldapuri    -H      Specify the URI of the LDAP server
+   --searchbase -b      Specify search base
+   --filter     -F      Search filter
+   --scope      -s      Search scope (base, one, or sub)
+   --tls        -Z[Z]   Try StartTLS (use twice to require TLS)
+   --dryrun     -n      Show what changes would be made
+   --help       -h      Help message
+   --verbose    -v      Be more verbose
+   --debug      -d      Turn on debugging
+
+=cut
+
+Getopt::Long::Configure("bundling");
+GetOptions(
+        'simpleauth|x'          => \$simpleauth,
+        'binddn|D=s'            => \@binddn,
+        'secret|w=s'            => \@secret,
+        'secretfile|y=s'        => \@secretfile,
+        'ldapuri|H=s'           => \@ldapuri,
+        'searchbase|b=s'        => \@searchbase,
+        'filter|F=s'            => \@filter,
+        'scope|s=s'             => \$scope,
+        'tls|Z+'                => \$starttls,
+        'dryrun|n'              => \$dryrun,
+        'help|h'                => \$help,
+        'verbose|v+'            => \$verbose,
+        'debug|d+'              => \$debug,
+    ) or pod2usage({ -exitval => 1, -verbose => 0 });
+
+pod2usage({ -exitval => 0, -verbose => 1 }) if ($help);
+pod2usage({ -exitval => 1, -verbose => 0 }) if (@ldapuri != 2);
+
+my (@ldap, @search, @tree);
+
+$verbose+=$debug if ($debug);
+
+$binddn[1]=$binddn[0] if (defined($binddn[0]) and !defined($binddn[1]));
+$secret[1]=$secret[0] if (defined($secret[0]) and !defined($secret[1]));
+$searchbase[1]=$searchbase[0]
+    if (defined($searchbase[0]) and !defined($searchbase[1]));
+$filter[1]=$filter[0] if (defined($filter[0]) and !defined($filter[1]));
+$filter[1]=$filter[0]="(objectClass=*)" if (!@filter);
+
+for my $n (0,1) {
+    print STDERR "Attempting to connect to $ldapuri[$n]...\n" if ($debug);
+    $ldap[$n]=Net::LDAP->new($ldapuri[$n])
+        or die "new($ldapuri[$n]) failed: $!\n";
+
+    my $mesg;
+
+    if ($starttls) {
+        print STDERR "  - starttls...\n" if ($debug);
+        $mesg=$ldap[$n]->start_tls(
+            verify => (($starttls > 1) ? 'require' : 'none'));
+        die "starttls failed: " . $mesg->error . "\n" if ($mesg->code);
+    }
+
+    my @bindopts;
+    push(@bindopts, $binddn[$n]) if defined($binddn[$n]);
+    push(@bindopts, 'password' => $secret[$n]) if defined($secret[$n]);
+
+    if (@bindopts) {
+        if ($debug) {
+            print STDERR "  - bindopts:\n";
+            my ($binddn,%opts)=@bindopts;
+            print STDERR "    binddn => $binddn\n";
+            for my $key (keys(%opts)) {
+                print STDERR "    $key => $opts{$key}\n";
+            }
+        }
+        $mesg=$ldap[$n]->bind(@bindopts);
+    } else {
+        print STDERR "  - anonymous bind...\n" if ($debug);
+        $mesg=$ldap[$n]->bind();
+    }
+    die "bind failed: " . $mesg->error . "\n" if ($mesg->code);
+
+    my @searchopts=(filter => $filter[$n]);
+    push(@searchopts, base => $searchbase[$n]) if defined($searchbase[$n]);
+    push(@searchopts, scope => $scope) if ($scope);
+    if ($verbose) {
+        my %opts=@searchopts;
+        for my $key (keys(%opts)) {
+            print "# $key => $opts{$key}\n";
+        }
+    }
+    $mesg=$ldap[$n]->search(@searchopts);
+    die "search failed: " . $mesg->error . "\n" if ($mesg->code);
+
+    $search[$n]=$mesg;
+    $tree[$n]=$mesg->as_struct;
+    if ($debug > 1) {
+        eval { use Net::LDAP::LDIF; };
+        Net::LDAP::LDIF->new(\*STDERR,"w")->write($mesg->entries);
+    }
+}
+
+if ($debug > 1) {
+    eval {
+        use Data::Dumper;
+
+        $Data::Dumper::Indent=1;
+        print STDERR Dumper(\@tree);
+    };
+}
+
+# First level - DN
+for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
+    my $changes=0;
+    if ($tree[0]->{$dn} and $tree[1]->{$dn}) {
+        # Modify?
+        print STDERR "Scanning DN '$dn'...\n" if ($debug);
+        # Second level - attributes
+        for my $attribute (keys %{{ %{$tree[0]->{$dn}}, %{$tree[1]->{$dn}} }}) {
+
+            if ($tree[0]->{$dn}->{$attribute}
+                and $tree[1]->{$dn}->{$attribute}) {
+                # Modify?
+                print STDERR "  - Checking attribute '$attribute'...\n"
+                    if ($debug);
+
+                if (@{$tree[0]->{$dn}->{$attribute}} == 1
+                    and @{$tree[1]->{$dn}->{$attribute}} == 1) {
+                    if ($tree[0]->{$dn}->{$attribute}->[0]
+                        ne $tree[1]->{$dn}->{$attribute}->[0]) {
+                        print "\ndn: $dn\nchangetype: modify\n"
+                            if ($changes == 0 and ($debug or $dryrun));
+                        print "-\n" if ($changes > 0 and ($debug or $dryrun));
+                        print STDERR "    MODIFY - "
+                            . $attribute . ": "
+                            . $tree[0]->{$dn}->{$attribute}->[0] . "\n"
+                            if ($debug);
+                        print "replace: $attribute\n"
+                            . $attribute . ": "
+                            . $tree[0]->{$dn}->{$attribute}->[0] . "\n"
+                            if ($debug or $dryrun);
+
+                        if (!$dryrun) {
+                            my $result=$ldap[1]->modify($dn,
+                                replace => {
+                                    $attribute
+                                        => $tree[0]->{$dn}->{$attribute}->[0]
+                                    });
+                            die "Failed to modify $attribute in $dn: "
+                                . $result->error . "\n"
+                                if $result->code;
+                        }
+
+                        $changes++;
+                    }
+                } else {
+                    # From the Perl FAQ.
+                    #
+                    #   How do I compute the difference of two arrays? How
+                    #   do I compute the intersection of two arrays?
+                    #
+                    #   Use a hash. Here’s code to do both and more. It
+                    #   assumes that each element is unique in a given
+                    #   array:
+                    #
+                    # Modified a bit to check for add/delete of individual
+                    # elements.
+
+                    my (%add, %union, %intersection, %difference, %count);
+
+                    %add = %union = %intersection = %difference = ();
+                    %count = ();
+                    for my $element (@{$tree[0]->{$dn}->{$attribute}}) {
+                        $add{$element}++;
+                        $count{$element}++;
+                    }
+                    for my $element (@{$tree[1]->{$dn}->{$attribute}}) {
+                        $count{$element}++;
+                    }
+                    for my $element (keys %count) {
+                        $union{$element}++;
+                        my $hash=$count{$element} > 1
+                            ? \%intersection : \%difference;
+                        $hash->{$element}++;
+                    }
+
+                    for my $element (keys %difference) {
+                        print "\ndn: $dn\nchangetype: modify\n"
+                            if ($changes == 0 and ($debug or $dryrun));
+                        print "-\n" if ($changes > 0 and ($debug or $dryrun));
+                        print STDERR "    "
+                            . ($add{$element} ? "ADD" : "DELETE")
+                            . " - $attribute: $element\n"
+                            if ($debug);
+                        if ($add{$element}) {
+                            print "add: $attribute\n$attribute: $element\n"
+                                if ($debug or $dryrun);
+                            if (!$dryrun) {
+                                my $result=$ldap[1]->modify($dn,
+                                    add => { $attribute => $element });
+                                die "Failed to add $attribute to $dn: "
+                                    . $result->error . "\n"
+                                    if $result->code;
+                            }
+                        } else {
+                            # This isn't right.  It would delete the whole thing.
+                            #print "delete: $attribute\n" if ($debug or $dryrun);
+                        }
+
+                        $changes++;
+                    }
+                }
+
+                #my @values;
+                #my $modify=0;
+                #if (@{$tree[0]->{$dn}->{$attribute}}
+                #    != @{$tree[1]->{$dn}->{$attribute}}) {
+                #    $modify++;
+                #} else {
+                #    for my $n (0, 1) {
+                #        for my $value (@{$tree[$n]->{$dn}->{$attribute}}) {
+                #            $values[$n]->{$value}++;
+                #        }
+                #    }
+                #    for my $n (0, 1) {
+                #        for my $value (@{$tree[$n]->{$dn}->{$attribute}}) {
+                #            if (!$values[1 & ~$n]->{$value}) {
+                #                $modify++;
+                #            }
+                #        }
+                #    }
+                #}
+
+                #print STDERR "    $attribute: "
+                #   . join(", ", @{$tree[0]->{$dn}->{$attribute}}) . "\n"
+                #   if ($modify and $debug);
+            } elsif ($tree[0]->{$dn}->{$attribute}
+                and !$tree[1]->{$dn}->{$attribute}) {
+                # Add...
+                print STDERR "    * Add attribute $attribute\n" if ($debug);
+                print "\ndn: $dn\nchangetype: modify\n"
+                    if ($changes == 0 and ($debug or $dryrun));
+                print "-\n" if ($changes > 0 and ($debug or $dryrun));
+
+                for my $element (@{$tree[0]->{$dn}->{$attribute}}) {
+                    print "add: $attribute\n$attribute: $element\n"
+                        if ($debug or $dryrun);
+                }
+
+                if (!$dryrun) {
+                    my $result=$ldap[1]->modify($dn,
+                        add => $tree[0]->{$dn}->{$attribute});
+                    die "Failed to add $attribute to $dn: "
+                        . $result->error . "\n"
+                        if $result->code;
+                }
+
+                $changes++;
+            } elsif ($tree[1]->{$dn}->{$attribute}
+                and !$tree[0]->{$dn}->{$attribute}) {
+                # Delete...
+                print STDERR "    * Delete attribute $attribute\n" if ($debug);
+                #print "\ndn: $dn\nchangetype: modify\n"
+                #    if ($changes == 0 and ($debug or $dryrun));
+                #print "-\n" if ($changes > 0 and ($debug or $dryrun));
+
+                #$changes++;
+            } else {
+                die "This shouldn't happen";
+            }
+        }
+    } elsif ($tree[0]->{$dn} and !$tree[1]->{$dn}) {
+        # Add...
+        print STDERR "  * Add DN $dn\n" if ($debug);
+        print "dn: $dn\n" if ($debug or $dryrun);
+        for my $attribute (keys %{$tree[0]->{$dn}}) {
+            for my $element (@{$tree[0]->{$dn}->{$attribute}}) {
+                print "$attribute: $element\n" if ($debug or $dryrun);
+            }
+        }
+
+        if (!$dryrun) {
+            my $result=$ldap[1]->add($dn, attrs => $tree[0]->{$dn});
+            die "Failed to add entry $dn: " . $result->error . "\n"
+                if $result->code;
+        }
+    } elsif ($tree[1]->{$dn} and !$tree[0]->{$dn}) {
+        # Delete...
+        print STDERR "  * Delete DN $dn\n" if ($debug);
+        # Do we really want deletes to happen automatically?
+        #if (!$dryrun) {
+        #    my $result=$ldap[1]->delete($dn);
+        #    die "Failed to delete entry $dn: " . $result->error . "\n"
+        #        if $result->code;
+        #}
+    } else {
+        die "This shouldn't happen";
+    }
+}
+#my (%add,%delete,%modify);
+#for my $key (keys($search[0]->as_struct())) {
+#    if (!defined($search[1]->as_struct()
+#}
+
+# vi: set ai et:
