@@ -1,6 +1,6 @@
 #!/usr/bin/perl
 #
-# ldapdiff - Compare the contents of the directory on two LDAP servers
+# ldapsync - Compare/sync the contents of the directory on two LDAP servers
 #
 # Copyright (C) 2006 Steven Pritchard <steve@kspei.com>
 # This program is free software; you can redistribute it
@@ -10,11 +10,11 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 #
-# $Id: ldapsync,v 1.3 2006/02/24 21:41:46 steve Exp $
+# $Id: ldapsync,v 1.4 2006/02/24 21:54:21 steve Exp $
 
 =head1 NAME
 
-ldapdiff - Compare the contents of the directory on two LDAP servers
+ldapsync - Compare/sync the contents of the directory on two LDAP servers
 
 =cut
 
@@ -42,7 +42,7 @@ our $dryrun=0;
 
 =head1 SYNOPSIS
 
-ldapdiff [options]
+ldapsync [options]
 
  Options:
    --simpleauth -x      Use simple authentication (default)
