@@ -10,7 +10,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 #
-# $Id: ldapsync,v 1.2 2006/02/24 18:06:58 steve Exp $
+# $Id: ldapsync,v 1.3 2006/02/24 21:41:46 steve Exp $
 
 =head1 NAME
 
@@ -94,7 +94,9 @@ $filter[1]=$filter[0]="(objectClass=*)" if (!@filter);
 
 for my $n (0,1) {
     print STDERR "Attempting to connect to $ldapuri[$n]...\n" if ($debug);
-    $ldap[$n]=Net::LDAP->new($ldapuri[$n])
+    my @opts=($ldapuri[$n]);
+    push(@opts, 'debug' => $debug) if ($debug);
+    $ldap[$n]=Net::LDAP->new(@opts)
         or die "new($ldapuri[$n]) failed: $!\n";
 
     my $mesg;
