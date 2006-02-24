@@ -10,7 +10,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 #
-# $Id: ldapsync,v 1.1 2006/02/21 21:21:02 steve Exp $
+# $Id: ldapsync,v 1.2 2006/02/24 18:06:58 steve Exp $
 
 =head1 NAME
 
@@ -158,6 +158,7 @@ if ($debug > 1) {
 # First level - DN
 for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
     my $changes=0;
+    my %mod=();
     if ($tree[0]->{$dn} and $tree[1]->{$dn}) {
         # Modify?
         print STDERR "Scanning DN '$dn'...\n" if ($debug);
@@ -186,16 +187,8 @@ for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
                             . $tree[0]->{$dn}->{$attribute}->[0] . "\n"
                             if ($debug or $dryrun);
 
-                        if (!$dryrun) {
-                            my $result=$ldap[1]->modify($dn,
-                                replace => {
-                                    $attribute
-                                        => $tree[0]->{$dn}->{$attribute}->[0]
-                                    });
-                            die "Failed to modify $attribute in $dn: "
-                                . $result->error . "\n"
-                                if $result->code;
-                        }
+                        push(@{$mod{replace}->{$attribute}},
+                            $tree[0]->{$dn}->{$attribute}->[0]);
 
                         $changes++;
                     }
@@ -241,13 +234,7 @@ for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
                         if ($add{$element}) {
                             print "add: $attribute\n$attribute: $element\n"
                                 if ($debug or $dryrun);
-                            if (!$dryrun) {
-                                my $result=$ldap[1]->modify($dn,
-                                    add => { $attribute => $element });
-                                die "Failed to add $attribute to $dn: "
-                                    . $result->error . "\n"
-                                    if $result->code;
-                            }
+                            push(@{$mod{add}->{$attribute}}, $element);
                         } else {
                             # This isn't right.  It would delete the whole thing.
                             #print "delete: $attribute\n" if ($debug or $dryrun);
@@ -256,30 +243,6 @@ for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
                         $changes++;
                     }
                 }
-
-                #my @values;
-                #my $modify=0;
-                #if (@{$tree[0]->{$dn}->{$attribute}}
-                #    != @{$tree[1]->{$dn}->{$attribute}}) {
-                #    $modify++;
-                #} else {
-                #    for my $n (0, 1) {
-                #        for my $value (@{$tree[$n]->{$dn}->{$attribute}}) {
-                #            $values[$n]->{$value}++;
-                #        }
-                #    }
-                #    for my $n (0, 1) {
-                #        for my $value (@{$tree[$n]->{$dn}->{$attribute}}) {
-                #            if (!$values[1 & ~$n]->{$value}) {
-                #                $modify++;
-                #            }
-                #        }
-                #    }
-                #}
-
-                #print STDERR "    $attribute: "
-                #   . join(", ", @{$tree[0]->{$dn}->{$attribute}}) . "\n"
-                #   if ($modify and $debug);
             } elsif ($tree[0]->{$dn}->{$attribute}
                 and !$tree[1]->{$dn}->{$attribute}) {
                 # Add...
@@ -291,14 +254,7 @@ for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
                 for my $element (@{$tree[0]->{$dn}->{$attribute}}) {
                     print "add: $attribute\n$attribute: $element\n"
                         if ($debug or $dryrun);
-                }
-
-                if (!$dryrun) {
-                    my $result=$ldap[1]->modify($dn,
-                        add => $tree[0]->{$dn}->{$attribute});
-                    die "Failed to add $attribute to $dn: "
-                        . $result->error . "\n"
-                        if $result->code;
+                    push(@{$mod{add}->{$attribute}}, $element);
                 }
 
                 $changes++;
@@ -314,6 +270,12 @@ for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
             } else {
                 die "This shouldn't happen";
             }
+        }
+
+        if ($changes and !$dryrun) {
+            my $result=$ldap[1]->modify($dn, %mod);
+            die "Failed to modify $dn: " . $result->error . "\n"
+                if $result->code;
         }
     } elsif ($tree[0]->{$dn} and !$tree[1]->{$dn}) {
         # Add...
@@ -343,9 +305,5 @@ for my $dn (keys %{{ %{$tree[0]}, %{$tree[1]} }}) {
         die "This shouldn't happen";
     }
 }
-#my (%add,%delete,%modify);
-#for my $key (keys($search[0]->as_struct())) {
-#    if (!defined($search[1]->as_struct()
-#}
 
 # vi: set ai et:
